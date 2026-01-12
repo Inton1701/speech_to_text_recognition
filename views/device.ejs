@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Voice Control - <%= deviceId %></title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Segoe UI', Arial, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .container {
+      max-width: 500px;
+      margin: 0 auto;
+    }
+    .card {
+      background: white;
+      border-radius: 20px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+      padding: 30px;
+      margin-bottom: 20px;
+    }
+    h1 {
+      color: #667eea;
+      text-align: center;
+      margin-bottom: 10px;
+      font-size: 28px;
+    }
+    .device-id {
+      text-align: center;
+      color: #666;
+      margin-bottom: 20px;
+      font-size: 14px;
+      font-family: monospace;
+    }
+    .status-badge {
+      display: inline-block;
+      padding: 8px 16px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+      margin-bottom: 20px;
+    }
+    .status-ready {
+      background: #d1fae5;
+      color: #065f46;
+    }
+    .status-recording {
+      background: #fee2e2;
+      color: #991b1b;
+    }
+    .status-processing {
+      background: #fef3c7;
+      color: #92400e;
+    }
+    .record-btn {
+      width: 100%;
+      padding: 60px 20px;
+      background: linear-gradient(135deg, #3498db 0%, #2980b9 100%);
+      color: white;
+      border: none;
+      border-radius: 20px;
+      font-size: 24px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.3s;
+      margin-bottom: 15px;
+      user-select: none;
+    }
+    .record-btn:hover {
+      transform: scale(1.02);
+      box-shadow: 0 10px 30px rgba(52, 152, 219, 0.3);
+    }
+    .record-btn.recording {
+      background: linear-gradient(135deg, #e74c3c 0%, #c0392b 100%);
+      animation: pulse 1s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.05); }
+    }
+    .instruction {
+      text-align: center;
+      color: #666;
+      font-size: 14px;
+      margin-bottom: 20px;
+    }
+    .result-box {
+      background: #f8f9fa;
+      padding: 20px;
+      border-radius: 15px;
+      margin-top: 20px;
+      display: none;
+    }
+    .result-box.show {
+      display: block;
+    }
+    .result-box.triggered {
+      background: #fee2e2;
+      border: 2px solid #ef4444;
+    }
+    .result-box.success {
+      background: #d1fae5;
+      border: 2px solid #10b981;
+    }
+    .result-title {
+      font-weight: 600;
+      margin-bottom: 10px;
+      font-size: 16px;
+    }
+    .result-text {
+      font-family: monospace;
+      font-size: 14px;
+      word-wrap: break-word;
+    }
+    .trigger-words {
+      background: #f0f0f0;
+      padding: 15px;
+      border-radius: 10px;
+      margin-bottom: 20px;
+    }
+    .trigger-words strong {
+      color: #667eea;
+      display: block;
+      margin-bottom: 8px;
+    }
+    .back-link {
+      display: block;
+      text-align: center;
+      color: white;
+      text-decoration: none;
+      margin-top: 20px;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <h1>🎙️ Voice Control</h1>
+      <div class="device-id">Device: <strong><%= deviceId %></strong></div>
+      
+      <div style="text-align: center; margin-bottom: 20px;">
+        <span class="status-badge status-ready" id="statusBadge">Ready</span>
+        <span class="status-badge" id="vadBadge" style="display: none; background: #e0e7ff; color: #3730a3; margin-left: 10px;">
+          🤐 Listening...
+        </span>
+      </div>
+      
+      <div class="trigger-words">
+        <strong>Say these words to trigger alarm:</strong>
+        <%= triggerWords %>
+      </div>
+      
+      <div style="background: #e0f2fe; padding: 12px; border-radius: 10px; margin-bottom: 20px; font-size: 13px; border-left: 4px solid #0ea5e9;">
+        <strong style="color: #075985;">💡 Voice Detection Active:</strong>
+        <ul style="margin: 8px 0 0 20px; color: #0c4a6e;">
+          <li>Only processes when voice is detected</li>
+          <li>3-second recording chunks when speaking</li>
+          <li>Skips silent periods (saves bandwidth)</li>
+          <li>Real-time audio level indicator</li>
+        </ul>
+      </div>
+      
+      <button id="recordBtn" class="record-btn">
+        🎙️<br>Start Continuous Monitoring
+      </button>
+      
+      <div class="instruction" id="instruction">
+        Click to start/stop continuous voice monitoring
+      </div>
+      
+      <div style="text-align: center; margin-bottom: 15px; display: none;" id="audioLevel">
+        <div style="background: #f0f0f0; height: 20px; border-radius: 10px; overflow: hidden;">
+          <div id="levelBar" style="background: linear-gradient(90deg, #10b981, #3b82f6); height: 100%; width: 0%; transition: width 0.1s;"></div>
+        </div>
+        <small style="color: #666; font-size: 12px;">Audio Level</small>
+      </div>
+      
+      <div id="resultBox" class="result-box">
+        <div class="result-title" id="resultTitle">Result</div>
+        <div class="result-text" id="resultText"></div>
+      </div>
+    </div>
+    
+    <a href="/" class="back-link">← Back to Home</a>
+  </div>
+
+  <script>
+    const deviceId = '<%= deviceId %>';
+    let mediaRecorder;
+    let audioChunks = [];
+    let isRecording = false;
+    let isContinuousMode = false;
+    let audioContext;
+    let analyser;
+    let microphone;
+    let recordingStartTime;
+    const RECORDING_DURATION = 3000; // Record for 3 seconds at a time
+    const VOICE_THRESHOLD = 5; // Minimum audio level to detect voice (lowered for sensitivity)
+    const SILENCE_DURATION = 1000; // ms of silence before considering no voice
+    let lastVoiceTime = 0;
+    let isVoiceDetected = false;
+    
+    const recordBtn = document.getElementById('recordBtn');
+    const statusBadge = document.getElementById('statusBadge');
+    const instruction = document.getElementById('instruction');
+    const resultBox = document.getElementById('resultBox');
+    const resultTitle = document.getElementById('resultTitle');
+    const resultText = document.getElementById('resultText');
+    const audioLevelDiv = document.getElementById('audioLevel');
+    const levelBar = document.getElementById('levelBar');
+    const vadBadge = document.getElementById('vadBadge');
+    
+    async function initMicrophone() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+          audio: {
+            channelCount: 1,
+            sampleRate: 16000,
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true
+          } 
+        });
+        
+        // Setup audio context for level monitoring
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        analyser = audioContext.createAnalyser();
+        microphone = audioContext.createMediaStreamSource(stream);
+        microphone.connect(analyser);
+        analyser.fftSize = 256;
+        
+        console.log('🎤 Microphone initialized');
+        console.log('Sample rate:', audioContext.sampleRate);
+        
+        // Use WebM format if supported, otherwise use default
+        const options = { mimeType: 'audio/webm;codecs=opus' };
+        
+        try {
+          mediaRecorder = new MediaRecorder(stream, options);
+        } catch (e) {
+          console.log('WebM not supported, trying default format');
+          mediaRecorder = new MediaRecorder(stream);
+        }
+        
+        console.log('📱 Using format:', mediaRecorder.mimeType);
+        
+        mediaRecorder.ondataavailable = (event) => {
+          if (event.data.size > 0) {
+            audioChunks.push(event.data);
+            console.log('📦 Audio chunk:', event.data.size, 'bytes');
+          }
+        };
+        
+        mediaRecorder.onstop = async () => {
+          const recordingDuration = Date.now() - recordingStartTime;
+          console.log('⏱️ Recording duration:', recordingDuration, 'ms');
+          console.log('📦 Total chunks:', audioChunks.length);
+          
+          if (audioChunks.length === 0) {
+            showError('No audio data captured. Please try again.');
+            return;
+          }
+          
+          const audioBlob = new Blob(audioChunks, { type: mediaRecorder.mimeType });
+          console.log('📦 Final blob size:', audioBlob.size, 'bytes');
+          audioChunks = [];
+          
+          if (recordingDuration < 500) {
+            showError('Recording too short. Hold button for at least 1 second.');
+            return;
+          }
+          
+          await processAudio(audioBlob);
+        };
+        
+        return true;
+      } catch (e) {
+        console.error('Microphone error:', e);
+        alert('Microphone access denied. Please allow microphone access and refresh.');
+        return false;
+      }
+    }
+    
+    async function processAudio(audioBlob) {
+      statusBadge.textContent = 'Processing...';
+      statusBadge.className = 'status-badge status-processing';
+      instruction.textContent = 'Analyzing your voice command...';
+      
+      console.log('📤 Sending audio:', {
+        size: audioBlob.size,
+        type: audioBlob.type,
+        deviceId: deviceId
+      });
+      
+      try {
+        const res = await fetch('/api/process-audio', {
+          method: 'POST',
+          headers: { 
+            'Content-Type': audioBlob.type || 'audio/webm',
+            'X-Device-ID': deviceId
+          },
+          body: audioBlob
+        });
+        
+        const data = await res.json();
+        console.log('📥 Received response:', data);
+        
+        if (data.success) {
+          showResult(data);
+        } else {
+          showError('Failed to process audio: ' + (data.error || 'Unknown error'));
+        }
+        
+        // If in continuous mode, restart recording
+        if (isContinuousMode) {
+          setTimeout(() => {
+            if (isContinuousMode) {
+              startRecordingCycle();
+            }
+          }, 500); // Small delay before next cycle
+        }
+      } catch (e) {
+        console.error('❌ Error:', e);
+        showError('Error sending audio: ' + e.message);
+        
+        // Retry in continuous mode
+        if (isContinuousMode) {
+          setTimeout(() => {
+            if (isContinuousMode) {
+              startRecordingCycle();
+            }
+          }, 2000);
+        }
+      }
+      
+      if (!isContinuousMode) {
+        statusBadge.textContent = 'Ready';
+        statusBadge.className = 'status-badge status-ready';
+        instruction.textContent = 'Click to start/stop continuous voice monitoring';
+      }
+    }
+    
+    function showResult(data) {
+      console.log('📊 Result:', data);
+      
+      resultTitle.textContent = data.triggered ? '🚨 ALARM TRIGGERED!' : '✓ Voice Recognized';
+      resultText.innerHTML = `
+        <strong>Transcription:</strong> ${data.transcription || '(listening...)'}<br>
+        <strong>Confidence:</strong> ${(data.confidence * 100).toFixed(1)}%<br>
+        <strong>Triggered:</strong> ${data.triggered ? 'YES' : 'NO'}
+        ${data.triggered ? '<br><strong>Words:</strong> ' + data.triggeredWords.join(', ') : ''}
+        ${data.processingTime ? '<br><strong>Processing Time:</strong> ' + data.processingTime + 'ms' : ''}
+      `;
+      
+      resultBox.className = 'result-box show ' + (data.triggered ? 'triggered' : 'success');
+    }
+    
+    function showError(message) {
+      resultTitle.textContent = '❌ Error';
+      resultText.textContent = message;
+      resultBox.className = 'result-box show';
+    }
+    
+    async function startRecording() {
+      if (!mediaRecorder) {
+        const success = await initMicrophone();
+        if (!success) return;
+      }
+      
+      if (!isContinuousMode) {
+        // Start continuous monitoring mode
+        isContinuousMode = true;
+        recordBtn.textContent = '⏹️\nStop Monitoring';
+        recordBtn.classList.add('recording');
+        statusBadge.textContent = 'Continuous Monitoring';
+        statusBadge.className = 'status-badge status-recording';
+        instruction.textContent = 'Listening continuously... Speak naturally';
+        audioLevelDiv.style.display = 'block';
+        vadBadge.style.display = 'inline-block';
+        
+        console.log('🎙️ Started continuous monitoring mode');
+        
+        // Initialize voice detection
+        lastVoiceTime = Date.now();
+        startRecordingCycle();
+      } else {
+        // Stop continuous mode
+        stopContinuousMode();
+      }
+    }
+    
+    function startRecordingCycle() {
+      if (!isContinuousMode) return;
+      
+      // More sensitive - record if voice detected or recently detected
+      const timeSinceLastVoice = Date.now() - lastVoiceTime;
+      const shouldRecord = isVoiceDetected || timeSinceLastVoice < (SILENCE_DURATION * 2) || lastVoiceTime === 0;
+      
+      if (!shouldRecord) {
+        console.log('⏭️ Skipping recording - no voice (last:', (timeSinceLastVoice / 1000).toFixed(1), 's ago)');
+        // Check again soon
+        setTimeout(() => {
+          if (isContinuousMode) {
+            startRecordingCycle();
+          }
+        }, 300); // Check more frequently
+        return;
+      }
+      
+      audioChunks = [];
+      recordingStartTime = Date.now();
+      
+      if (mediaRecorder.state === 'inactive') {
+        console.log('🎙️ Starting recording cycle (voice level check passed)');
+        mediaRecorder.start(100);
+        isRecording = true;
+        
+        // Monitor audio levels
+        monitorAudioLevel();
+        
+        // Auto-stop after RECORDING_DURATION
+        setTimeout(() => {
+          if (isRecording && isContinuousMode) {
+            mediaRecorder.stop();
+            isRecording = false;
+          }
+        }, RECORDING_DURATION);
+      }
+    }
+    
+    function monitorAudioLevel() {
+      if (!isRecording || !analyser) return;
+      
+      const dataArray = new Uint8Array(analyser.frequencyBinCount);
+      analyser.getByteFrequencyData(dataArray);
+      
+      const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
+      const percentage = Math.min(100, (average / 128) * 100);
+      
+      // Update visual indicator
+      levelBar.style.width = percentage + '%';
+      
+      // Voice Activity Detection
+      if (average > VOICE_THRESHOLD) {
+        lastVoiceTime = Date.now();
+        if (!isVoiceDetected) {
+          isVoiceDetected = true;
+          console.log('🗣️ Voice detected! Level:', average.toFixed(1), '(threshold:', VOICE_THRESHOLD + ')');
+          vadBadge.textContent = '🗣️ Voice Detected';
+          vadBadge.style.background = '#fee2e2';
+          vadBadge.style.color = '#991b1b';
+          levelBar.style.background = 'linear-gradient(90deg, #ef4444, #dc2626)';
+        }
+      } else {
+        // Check if silence duration exceeded
+        if (isVoiceDetected && (Date.now() - lastVoiceTime) > SILENCE_DURATION) {
+          isVoiceDetected = false;
+          console.log('🤐 Silence detected (below threshold:', VOICE_THRESHOLD + ')');
+          vadBadge.textContent = '🤐 Listening...';
+          vadBadge.style.background = '#e0e7ff';
+          vadBadge.style.color = '#3730a3';
+          levelBar.style.background = 'linear-gradient(90deg, #10b981, #3b82f6)';
+        }
+      }
+      
+      if (isRecording) {
+        requestAnimationFrame(monitorAudioLevel);
+      }
+    }
+    
+    function stopRecording() {
+      if (isRecording) {
+        mediaRecorder.stop();
+        isRecording = false;
+        
+        recordBtn.textContent = '🎙️\nHold to Record';
+        recordBtn.classList.remove('recording');
+        audioLevelDiv.style.display = 'none';
+        levelBar.style.width = '0%';
+      }
+    }
+    
+    function stopContinuousMode() {
+      isContinuousMode = false;
+      isVoiceDetected = false;
+      
+      if (isRecording && mediaRecorder.state !== 'inactive') {
+        mediaRecorder.stop();
+        isRecording = false;
+      }
+      
+      recordBtn.textContent = '🎙️\nStart Continuous Monitoring';
+      recordBtn.classList.remove('recording');
+      statusBadge.textContent = 'Ready';
+      statusBadge.className = 'status-badge status-ready';
+      instruction.textContent = 'Click to start/stop continuous voice monitoring';
+      audioLevelDiv.style.display = 'none';
+      vadBadge.style.display = 'none';
+      levelBar.style.width = '0%';
+      
+      console.log('⏹️ Stopped continuous monitoring');
+    }
+    
+    // Click event (toggle continuous mode)
+    recordBtn.addEventListener('click', startRecording);
+  </script>
+</body>
+</html>
