@@ -56,6 +56,17 @@
       background: #fef3c7;
       color: #92400e;
     }
+    select {
+      transition: border-color 0.3s;
+    }
+    select:hover {
+      border-color: #667eea;
+    }
+    select:focus {
+      outline: none;
+      border-color: #667eea;
+      box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+    }
     .record-btn {
       width: 100%;
       padding: 60px 20px;
@@ -150,9 +161,14 @@
         </span>
       </div>
       
-      <div class="trigger-words">
-        <strong>Say these words to trigger alarm:</strong>
-        <%= triggerWords %>
+      <div style="margin-bottom: 20px;">
+        <label style="display: block; margin-bottom: 8px; color: #333; font-weight: 600; font-size: 14px;">
+          🤖 Speech Recognition API
+        </label>
+        <select id="apiSelector" style="width: 100%; padding: 12px; border: 2px solid #e0e0e0; border-radius: 8px; font-size: 14px; background: white; cursor: pointer;">
+          <option value="assemblyai">AssemblyAI</option>
+          <option value="deepgram">Deepgram</option>
+        </select>
       </div>
       
       <div style="background: #e0f2fe; padding: 12px; border-radius: 10px; margin-bottom: 20px; font-size: 13px; border-left: 4px solid #0ea5e9;">
@@ -200,8 +216,8 @@
     let microphone;
     let recordingStartTime;
     const RECORDING_DURATION = 3000; // Record for 3 seconds at a time
-    const VOICE_THRESHOLD = 5; // Minimum audio level to detect voice (lowered for sensitivity)
-    const SILENCE_DURATION = 1000; // ms of silence before considering no voice
+    const VOICE_THRESHOLD = 2; // Minimum audio level to detect voice (lowered from 5 to 2 for better sensitivity)
+    const SILENCE_DURATION = 800; // ms of silence before considering no voice (reduced for faster response)
     let lastVoiceTime = 0;
     let isVoiceDetected = false;
     
@@ -291,10 +307,13 @@
       statusBadge.className = 'status-badge status-processing';
       instruction.textContent = 'Analyzing your voice command...';
       
+      const selectedAPI = document.getElementById('apiSelector').value;
+      
       console.log('📤 Sending audio:', {
         size: audioBlob.size,
         type: audioBlob.type,
-        deviceId: deviceId
+        deviceId: deviceId,
+        api: selectedAPI
       });
       
       try {
@@ -302,7 +321,8 @@
           method: 'POST',
           headers: { 
             'Content-Type': audioBlob.type || 'audio/webm',
-            'X-Device-ID': deviceId
+            'X-Device-ID': deviceId,
+            'X-Speech-API': selectedAPI
           },
           body: audioBlob
         });
@@ -352,6 +372,7 @@
       resultText.innerHTML = `
         <strong>Transcription:</strong> ${data.transcription || '(listening...)'}<br>
         <strong>Confidence:</strong> ${(data.confidence * 100).toFixed(1)}%<br>
+        <strong>API Used:</strong> ${data.speechAPI || 'unknown'}<br>
         <strong>Triggered:</strong> ${data.triggered ? 'YES' : 'NO'}
         ${data.triggered ? '<br><strong>Words:</strong> ' + data.triggeredWords.join(', ') : ''}
         ${data.processingTime ? '<br><strong>Processing Time:</strong> ' + data.processingTime + 'ms' : ''}

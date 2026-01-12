@@ -2,11 +2,15 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const { createClient, LiveTranscriptionEvents } = require('@deepgram/sdk');
+const { AssemblyAI } = require('assemblyai');
+const axios = require('axios');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
+const ASSEMBLYAI_API_KEY = process.env.ASSEMBLYAI_API_KEY;
+const SPEECH_API = process.env.SPEECH_API || 'deepgram'; // 'deepgram' or 'assemblyai'
 const TRIGGER_WORDS = (process.env.TRIGGER_WORDS || 'alarm,emergency,help,fire').toLowerCase().split(',');
 
 // Store device results (in production, use Redis or database)
@@ -36,6 +40,34 @@ app.set('views', path.join(__dirname, 'views'));
 // Initialize Deepgram client
 const deepgram = createClient(DEEPGRAM_API_KEY);
 
+// Initialize AssemblyAI client
+const assemblyai = new AssemblyAI({
+  apiKey: ASSEMBLYAI_API_KEY
+});
+
+console.log(`🎤 Speech API: ${SPEECH_API.toUpperCase()}`);
+console.log(`🔑 API Key configured: ${SPEECH_API === 'assemblyai' ? '✓ AssemblyAI' : '✓ Deepgram'}`);
+
+// Helper function: Calculate similarity between two strings using Dice coefficient
+function calculateSimilarity(str1, str2) {
+  const bigrams1 = getBigrams(str1);
+  const bigrams2 = getBigrams(str2);
+  
+  const intersection = bigrams1.filter(bigram => bigrams2.includes(bigram));
+  const similarity = (2.0 * intersection.length) / (bigrams1.length + bigrams2.length);
+  
+  return similarity;
+}
+
+// Helper function: Get bigrams from a string
+function getBigrams(str) {
+  const bigrams = [];
+  for (let i = 0; i < str.length - 1; i++) {
+    bigrams.push(str.substring(i, i + 2));
+  }
+  return bigrams;
+}
+
 // Home page - Device control interface
 app.get('/', (req, res) => {
   res.render('index', { 
@@ -57,9 +89,124 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'ok', 
     timestamp: new Date().toISOString(),
-    triggerWords: TRIGGER_WORDS 
+    triggerWords: TRIGGER_WORDS,
+    speechAPI: SPEECH_API
   });
 });
+
+// Transcribe with AssemblyAI
+async function transcribeWithAssemblyAI(audioBuffer, contentType) {
+  console.log('🎤 Using AssemblyAI for transcription...');
+  
+  try {
+    // Upload audio file first
+    console.log('📤 Uploading audio to AssemblyAI...');
+    const uploadResponse = await axios.post('https://api.assemblyai.com/v2/upload', audioBuffer, {
+      headers: {
+        'authorization': ASSEMBLYAI_API_KEY,
+        'content-type': contentType || 'application/octet-stream'
+      }
+    });
+    
+    const uploadUrl = uploadResponse.data.upload_url;
+    console.log('✓ Audio uploaded:', uploadUrl);
+    
+    // Request transcription
+    console.log('🔄 Requesting transcription...');
+    const transcriptResponse = await axios.post('https://api.assemblyai.com/v2/transcript', {
+      audio_url: uploadUrl,
+      language_code: 'en'
+    }, {
+      headers: {
+        'authorization': ASSEMBLYAI_API_KEY,
+        'content-type': 'application/json'
+      }
+    });
+    
+    const transcriptId = transcriptResponse.data.id;
+    console.log('✓ Transcription job created:', transcriptId);
+    
+    // Poll for completion
+    let transcript;
+    let attempts = 0;
+    const maxAttempts = 60; // 60 seconds timeout
+    
+    while (attempts < maxAttempts) {
+      const pollingResponse = await axios.get(`https://api.assemblyai.com/v2/transcript/${transcriptId}`, {
+        headers: {
+          'authorization': ASSEMBLYAI_API_KEY
+        }
+      });
+      
+      transcript = pollingResponse.data;
+      
+      if (transcript.status === 'completed') {
+        console.log('✓ Transcription completed');
+        return {
+          transcript: transcript.text || '',
+          confidence: transcript.confidence || 0
+        };
+      } else if (transcript.status === 'error') {
+        console.error('❌ AssemblyAI transcription error:', transcript.error);
+        throw new Error(transcript.error || 'Transcription failed');
+      }
+      
+      // Wait 1 second before polling again
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      attempts++;
+    }
+    
+    throw new Error('Transcription timeout');
+    
+  } catch (error) {
+    console.error('❌ AssemblyAI error:', error.message);
+    throw error;
+  }
+}
+
+// Transcribe with Deepgram
+async function transcribeWithDeepgram(audioBuffer, contentType) {
+  console.log('🎤 Using Deepgram for transcription...');
+  
+  let deepgramOptions = {
+    model: 'nova-2',
+    language: 'en',
+    smart_format: true,
+    punctuate: true,
+    diarize: false
+  };
+  
+  // Configure based on audio format
+  if (contentType.includes('audio/webm') || contentType.includes('webm')) {
+    console.log('🔧 Configuring for WebM/Opus format');
+  } else if (contentType.includes('audio/wav') || contentType.includes('wav')) {
+    console.log('🔧 Configuring for WAV format');
+  } else if (contentType.includes('audio/raw')) {
+    console.log('🔧 Configuring for raw PCM format');
+    deepgramOptions.encoding = 'linear16';
+    deepgramOptions.sample_rate = 16000;
+    deepgramOptions.channels = 1;
+  } else {
+    console.log('🔧 Unknown format, letting Deepgram auto-detect');
+  }
+  
+  console.log('Options:', JSON.stringify(deepgramOptions));
+  
+  const { result, error } = await deepgram.listen.prerecorded.transcribeFile(
+    audioBuffer,
+    deepgramOptions
+  );
+  
+  if (error) {
+    console.error('❌ Deepgram error:', error);
+    throw new Error('Transcription failed: ' + error.message);
+  }
+  
+  const transcript = result?.results?.channels?.[0]?.alternatives?.[0]?.transcript || '';
+  const confidence = result?.results?.channels?.[0]?.alternatives?.[0]?.confidence || 0;
+  
+  return { transcript, confidence };
+}
 
 // Process audio from ESP32 and return transcription with trigger status
 app.post('/api/process-audio', async (req, res) => {
@@ -68,6 +215,10 @@ app.post('/api/process-audio', async (req, res) => {
   console.log('Content-Type:', req.headers['content-type']);
   console.log('Content-Length:', req.headers['content-length']);
   console.log('Device ID:', req.headers['x-device-id'] || 'unknown');
+  
+  // Check if API is specified in request header, otherwise use .env default
+  const requestedAPI = req.headers['x-speech-api'] || SPEECH_API;
+  console.log('Speech API:', requestedAPI.toUpperCase());
   
   try {
     const audioData = req.body;
@@ -86,43 +237,21 @@ app.post('/api/process-audio', async (req, res) => {
     const contentType = req.headers['content-type'] || 'audio/webm';
     console.log('🎵 Audio format:', contentType);
     
-    let deepgramOptions = {
-      model: 'nova-2',
-      language: 'en',
-      smart_format: true,
-      punctuate: true,
-      diarize: false
-    };
+    // Transcribe using selected API
+    let transcript, confidence;
     
-    // Configure based on audio format
-    if (contentType.includes('audio/webm') || contentType.includes('webm')) {
-      // WebM with Opus codec (most common from browsers)
-      console.log('🔧 Configuring for WebM/Opus format');
-      // Deepgram auto-detects WebM, but we can be explicit
-    } else if (contentType.includes('audio/wav') || contentType.includes('wav')) {
-      console.log('🔧 Configuring for WAV format (auto-detect)');
-      // Deepgram auto-detects WAV
-    } else if (contentType.includes('audio/raw')) {
-      // Raw PCM data
-      console.log('🔧 Configuring for raw PCM format');
-      deepgramOptions.encoding = 'linear16';
-      deepgramOptions.sample_rate = 16000;
-      deepgramOptions.channels = 1;
-    } else {
-      console.log('🔧 Unknown format, letting Deepgram auto-detect');
-    }
-    
-    console.log('🎤 Sending to Deepgram...');
-    console.log('Options:', JSON.stringify(deepgramOptions));
-    
-    // Send to Deepgram for transcription
-    const { result, error } = await deepgram.listen.prerecorded.transcribeFile(
-      audioData,
-      deepgramOptions
-    );
-    
-    if (error) {
-      console.error('❌ Deepgram error:', error);
+    try {
+      if (requestedAPI === 'assemblyai') {
+        const result = await transcribeWithAssemblyAI(audioData, contentType);
+        transcript = result.transcript;
+        confidence = result.confidence;
+      } else {
+        const result = await transcribeWithDeepgram(audioData, contentType);
+        transcript = result.transcript;
+        confidence = result.confidence;
+      }
+    } catch (error) {
+      console.error('❌ Transcription error:', error);
       return res.status(500).json({ 
         success: false, 
         error: 'Transcription failed',
@@ -130,21 +259,45 @@ app.post('/api/process-audio', async (req, res) => {
       });
     }
     
-    // Debug: Log full Deepgram response
-    console.log('🔍 Full Deepgram response:', JSON.stringify(result, null, 2));
-    
-    // Extract transcription
-    const transcript = result?.results?.channels?.[0]?.alternatives?.[0]?.transcript || '';
-    const confidence = result?.results?.channels?.[0]?.alternatives?.[0]?.confidence || 0;
-    
     console.log('📝 Transcription:', transcript);
     console.log('📊 Confidence:', confidence);
     
-    // Check for trigger words
+    // Enhanced trigger word detection with fuzzy matching
     const transcriptLower = transcript.toLowerCase();
-    const triggeredWords = TRIGGER_WORDS.filter(word => 
-      transcriptLower.includes(word.trim())
-    );
+    const transcriptWords = transcriptLower.split(/\s+/); // Split into individual words
+    
+    const triggeredWords = [];
+    
+    for (const triggerWord of TRIGGER_WORDS) {
+      const trimmedTrigger = triggerWord.trim().toLowerCase();
+      
+      // Method 1: Exact match (current behavior)
+      if (transcriptLower.includes(trimmedTrigger)) {
+        triggeredWords.push(trimmedTrigger);
+        continue;
+      }
+      
+      // Method 2: Check if any word in transcript contains the trigger word (partial match)
+      for (const word of transcriptWords) {
+        if (word.includes(trimmedTrigger) || trimmedTrigger.includes(word)) {
+          if (word.length >= 2 && trimmedTrigger.length >= 2) { // Avoid single letter matches
+            triggeredWords.push(trimmedTrigger + ' (matched: ' + word + ')');
+            break;
+          }
+        }
+      }
+      
+      // Method 3: Fuzzy match - check similarity
+      for (const word of transcriptWords) {
+        if (word.length >= 3 && trimmedTrigger.length >= 3) {
+          const similarity = calculateSimilarity(word, trimmedTrigger);
+          if (similarity >= 0.7) { // 70% similarity threshold
+            triggeredWords.push(trimmedTrigger + ' (fuzzy: ' + word + ', ' + (similarity * 100).toFixed(0) + '%)');
+            break;
+          }
+        }
+      }
+    }
     
     const shouldTrigger = triggeredWords.length > 0;
     
@@ -178,6 +331,7 @@ app.post('/api/process-audio', async (req, res) => {
       triggered: shouldTrigger,
       triggeredWords: triggeredWords,
       processingTime: processingTime,
+      speechAPI: requestedAPI,
       timestamp: new Date().toISOString()
     };
     
