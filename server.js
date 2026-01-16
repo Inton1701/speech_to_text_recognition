@@ -1,12 +1,16 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const http = require('http');
+const WebSocket = require('ws');
 const { createClient, LiveTranscriptionEvents } = require('@deepgram/sdk');
 const { AssemblyAI } = require('assemblyai');
 const axios = require('axios');
 require('dotenv').config();
 
 const app = express();
+const server = http.createServer(app);
+const wss = new WebSocket.Server({ noServer: true });
 const PORT = process.env.PORT || 3000;
 const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
 const ASSEMBLYAI_API_KEY = process.env.ASSEMBLYAI_API_KEY;
@@ -47,6 +51,238 @@ const assemblyai = new AssemblyAI({
 
 console.log(`🎤 Speech API: ${SPEECH_API.toUpperCase()}`);
 console.log(`🔑 API Key configured: ${SPEECH_API === 'assemblyai' ? '✓ AssemblyAI' : '✓ Deepgram'}`);
+
+// WebSocket connections for live audio streaming
+const deviceConnections = new Map();
+const SAMPLE_RATE = 16000;
+const BUFFER_DURATION = 3; // seconds (for AssemblyAI buffering)
+
+wss.on('connection', (ws, req) => {
+  const urlPath = req.url;
+  const deviceIdMatch = urlPath.match(/\/ws\/audio\/([^/]+)/);
+  const deviceId = deviceIdMatch ? deviceIdMatch[1] : 'unknown';
+  
+  console.log(`\n🎤 [WS] Device ${deviceId} connected via WebSocket`);
+  console.log(`[${deviceId}] Using ${SPEECH_API.toUpperCase()} for transcription`);
+  
+  let audioBuffer = [];
+  let deepgramConnection = null;
+  let processingInterval = null;
+  
+  deviceConnections.set(deviceId, ws);
+  
+  // Initialize Deepgram live transcription
+  if (SPEECH_API === 'deepgram') {
+    console.log(`[${deviceId}] Starting Deepgram live transcription...`);
+    
+    deepgramConnection = deepgram.listen.live({
+      model: 'nova-2',
+      language: 'en',
+      smart_format: true,
+      interim_results: false,
+      utterance_end_ms: 1000,
+      endpointing: 300
+    });
+    
+    deepgramConnection.on(LiveTranscriptionEvents.Open, () => {
+      console.log(`[${deviceId}] ✓ Deepgram connection opened`);
+      
+      deepgramConnection.on(LiveTranscriptionEvents.Transcript, (data) => {
+        const transcript = data.channel.alternatives[0].transcript;
+        const confidence = data.channel.alternatives[0].confidence;
+        
+        if (transcript && transcript.trim().length > 0) {
+          console.log(`[${deviceId}] 📝 "${transcript}" (${(confidence * 100).toFixed(1)}%)`);
+          
+          const triggered = checkTriggerWords(transcript);
+          
+          if (triggered) {
+            console.log(`\n🚨 [${deviceId}] ALARM TRIGGERED: "${transcript}"\n`);
+            
+            deviceResults.set(deviceId, {
+              triggered: true,
+              transcription: transcript,
+              confidence: confidence,
+              timestamp: new Date().toISOString()
+            });
+            
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({
+                command: 'ALARM',
+                transcription: transcript,
+                confidence: confidence
+              }));
+            }
+          } else {
+            // Send transcription update
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({
+                type: 'transcription',
+                transcription: transcript,
+                confidence: confidence
+              }));
+            }
+          }
+        }
+      });
+      
+      deepgramConnection.on(LiveTranscriptionEvents.Error, (error) => {
+        console.error(`[${deviceId}] Deepgram error:`, error);
+      });
+      
+      deepgramConnection.on(LiveTranscriptionEvents.Close, () => {
+        console.log(`[${deviceId}] Deepgram connection closed`);
+      });
+    });
+  }
+  
+  // Initialize AssemblyAI buffered transcription
+  if (SPEECH_API === 'assemblyai') {
+    console.log(`[${deviceId}] Starting AssemblyAI buffered transcription (${BUFFER_DURATION}s chunks)...`);
+    
+    // Process audio buffer periodically
+    processingInterval = setInterval(async () => {
+      if (audioBuffer.length > 0) {
+        const bufferCopy = [...audioBuffer];
+        audioBuffer = [];
+        await processAssemblyAIBuffer(deviceId, bufferCopy, ws);
+      }
+    }, BUFFER_DURATION * 1000);
+  }
+  
+  ws.on('message', (data) => {
+    if (typeof data === 'string') {
+      // Text message (device info, commands)
+      try {
+        const msg = JSON.parse(data);
+        if (msg.type === 'device_id') {
+          console.log(`[WS] Device identified: ${msg.deviceId}`);
+        }
+      } catch (e) {
+        // Ignore parse errors
+      }
+    } else {
+      // Binary audio data
+      if (SPEECH_API === 'deepgram' && deepgramConnection) {
+        // Stream directly to Deepgram
+        deepgramConnection.send(data);
+      } else if (SPEECH_API === 'assemblyai') {
+        // Buffer for AssemblyAI
+        audioBuffer.push(Buffer.from(data));
+      }
+    }
+  });
+  
+  ws.on('close', () => {
+    console.log(`[WS] Device ${deviceId} disconnected`);
+    deviceConnections.delete(deviceId);
+    
+    if (deepgramConnection) {
+      deepgramConnection.finish();
+    }
+    
+    if (processingInterval) {
+      clearInterval(processingInterval);
+    }
+  });
+  
+  ws.on('error', (error) => {
+    console.error(`[${deviceId}] WebSocket error:`, error);
+  });
+});
+
+// Check if transcript contains trigger words
+function checkTriggerWords(transcript) {
+  const lowerTranscript = transcript.toLowerCase();
+  return TRIGGER_WORDS.some(word => {
+    const similarity = calculateSimilarity(lowerTranscript, word);
+    return lowerTranscript.includes(word) || similarity > 0.8;
+  });
+}
+
+// Process buffered audio for AssemblyAI
+async function processAssemblyAIBuffer(deviceId, audioBuffer, ws) {
+  if (audioBuffer.length === 0) return;
+  
+  try {
+    const audioData = Buffer.concat(audioBuffer);
+    console.log(`[${deviceId}] Processing ${audioData.length} bytes with AssemblyAI...`);
+    
+    // Create WAV buffer
+    const wavBuffer = createWavBuffer(audioData);
+    
+    // Transcribe with AssemblyAI
+    const transcript = await assemblyai.transcripts.transcribe({
+      audio: wavBuffer,
+      language_code: 'en'
+    });
+    
+    if (transcript.text && transcript.text.trim().length > 0) {
+      const confidence = transcript.confidence || 0;
+      console.log(`[${deviceId}] 📝 "${transcript.text}" (${(confidence * 100).toFixed(1)}%)`);
+      
+      const triggered = checkTriggerWords(transcript.text);
+      
+      if (triggered) {
+        console.log(`\n🚨 [${deviceId}] ALARM TRIGGERED: "${transcript.text}"\n`);
+        
+        deviceResults.set(deviceId, {
+          triggered: true,
+          transcription: transcript.text,
+          confidence: confidence,
+          timestamp: new Date().toISOString()
+        });
+        
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            command: 'ALARM',
+            transcription: transcript.text,
+            confidence: confidence
+          }));
+        }
+      } else {
+        // Send transcription update
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            type: 'transcription',
+            transcription: transcript.text,
+            confidence: confidence
+          }));
+        }
+      }
+    }
+  } catch (error) {
+    console.error(`[${deviceId}] Error processing audio with AssemblyAI:`, error.message);
+  }
+}
+
+// Create WAV buffer from PCM data
+function createWavBuffer(pcmData) {
+  const sampleRate = SAMPLE_RATE;
+  const numChannels = 1;
+  const bitsPerSample = 16;
+  const byteRate = sampleRate * numChannels * bitsPerSample / 8;
+  const blockAlign = numChannels * bitsPerSample / 8;
+  const dataSize = pcmData.length;
+  const fileSize = 44 + dataSize;
+  
+  const header = Buffer.alloc(44);
+  header.write('RIFF', 0);
+  header.writeUInt32LE(fileSize - 8, 4);
+  header.write('WAVE', 8);
+  header.write('fmt ', 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(numChannels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(bitsPerSample, 34);
+  header.write('data', 36);
+  header.writeUInt32LE(dataSize, 40);
+  
+  return Buffer.concat([header, pcmData]);
+}
 
 // Helper function: Calculate similarity between two strings using Dice coefficient
 function calculateSimilarity(str1, str2) {
@@ -416,21 +652,52 @@ app.post('/api/config/trigger-words', (req, res) => {
   });
 });
 
-// Start server
-app.listen(PORT, '0.0.0.0', () => {
+// Handle WebSocket upgrade requests
+server.on('upgrade', (request, socket, head) => {
+  const pathname = new URL(request.url, 'http://localhost').pathname;
+  
+  // Check if this is a WebSocket audio endpoint
+  if (pathname.startsWith('/ws/audio/')) {
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      wss.emit('connection', ws, request);
+    });
+  } else {
+    // Reject other WebSocket connections
+    socket.destroy();
+  }
+});
+
+// Start server (use server.listen, not app.listen)
+server.listen(PORT, '0.0.0.0', () => {
   console.log('\n╔═══════════════════════════════════════════════════╗');
   console.log('║   Voice Recognition Alarm Backend Server         ║');
   console.log('╚═══════════════════════════════════════════════════╝');
   console.log('');
   console.log('🚀 Server running on port:', PORT);
-  console.log('🔑 Deepgram API Key:', DEEPGRAM_API_KEY ? '✓ Configured' : '✗ Missing');
+  
+  // Display active speech API configuration
+  if (SPEECH_API === 'deepgram') {
+    console.log('🎤 Speech API: Deepgram');
+    console.log('   ⚡ Mode: Live streaming (real-time)');
+    console.log('   ⏱️  Latency: <1 second');
+    console.log('   🔑 API Key:', DEEPGRAM_API_KEY ? '✓ Configured' : '✗ Missing');
+  } else if (SPEECH_API === 'assemblyai') {
+    console.log('🎤 Speech API: AssemblyAI');
+    console.log('   📦 Mode: Buffered processing (3-second chunks)');
+    console.log('   ⏱️  Latency: 2-5 seconds');
+    console.log('   🔑 API Key:', ASSEMBLYAI_API_KEY ? '✓ Configured' : '✗ Missing');
+  }
+  
   console.log('🎯 Trigger words:', TRIGGER_WORDS.join(', '));
   console.log('');
-  console.log('📍 Endpoints:');
+  console.log('📍 HTTP Endpoints:');
   console.log('   GET  /health              - Health check');
   console.log('   POST /api/process-audio   - Process audio and get transcription');
   console.log('   GET  /api/config          - Get configuration');
   console.log('   POST /api/config/trigger-words - Update trigger words');
+  console.log('');
+  console.log('🔌 WebSocket Endpoints:');
+  console.log('   WS   /ws/audio/:deviceId  - Live audio streaming from ESP32 devices');
   console.log('');
   console.log('🌐 Ready to accept requests!');
   console.log('═══════════════════════════════════════════════════\n');
