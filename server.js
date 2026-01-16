@@ -16,9 +16,22 @@ const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
 const ASSEMBLYAI_API_KEY = process.env.ASSEMBLYAI_API_KEY;
 const SPEECH_API = process.env.SPEECH_API || 'deepgram'; // 'deepgram' or 'assemblyai'
 const TRIGGER_WORDS = (process.env.TRIGGER_WORDS || 'alarm,emergency,help,fire').toLowerCase().split(',');
+const DEVICE_KEY = process.env.DEVICE_KEY || 'esp32-internal-key-change-in-production';
 
 // Store device results (in production, use Redis or database)
 const deviceResults = new Map();
+
+// Middleware: Device authentication for internal endpoints
+function authenticateDevice(req, res, next) {
+  const deviceKey = req.headers['x-device-key'];
+  
+  if (!deviceKey || deviceKey !== DEVICE_KEY) {
+    console.warn('⚠️ Unauthorized device access attempt');
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  
+  next();
+}
 
 // Middleware
 app.use(cors());
@@ -628,6 +641,60 @@ app.post('/api/device/:deviceId/clear', (req, res) => {
   deviceResults.delete(deviceId);
   res.json({ success: true });
 });
+
+// ========================================
+// INTERNAL ENDPOINTS (HTTP-only for ESP32)
+// ========================================
+
+// Internal: Device heartbeat (HTTP-only, no HTTPS required)
+app.post('/internal/device/:deviceId/heartbeat', authenticateDevice, (req, res) => {
+  const { deviceId } = req.params;
+  const { alive, ip, rssi } = req.body;
+  
+  console.log(`💓 [Internal] Heartbeat from ${deviceId} (RSSI: ${rssi}dBm)`);
+  
+  // Check for pending triggers
+  const result = deviceResults.get(deviceId);
+  
+  if (result) {
+    deviceResults.delete(deviceId);
+    console.log(`🚨 [Internal] Sending ALARM to ${deviceId}`);
+    return res.json({
+      triggered: true,
+      command: 'ALARM',
+      ...result
+    });
+  }
+  
+  res.json({
+    triggered: false,
+    message: 'ok'
+  });
+});
+
+// Internal: Device status check (HTTP-only)
+app.get('/internal/device/:deviceId/status', authenticateDevice, (req, res) => {
+  const { deviceId } = req.params;
+  const result = deviceResults.get(deviceId);
+  
+  if (result) {
+    deviceResults.delete(deviceId);
+    console.log(`✓ [Internal] Sent trigger result to ${deviceId}`);
+    res.json({
+      triggered: true,
+      ...result
+    });
+  } else {
+    res.json({
+      triggered: false,
+      message: 'No pending triggers'
+    });
+  }
+});
+
+// ========================================
+// PUBLIC ENDPOINTS (HTTPS recommended)
+// ========================================
 
 // Update trigger words (optional)
 app.post('/api/config/trigger-words', (req, res) => {
