@@ -33,6 +33,23 @@ function authenticateDevice(req, res, next) {
   next();
 }
 
+// Middleware: Allow HTTP for ESP32 internal routes, force HTTPS for everything else
+app.use((req, res, next) => {
+  // Allow ESP32 internal HTTP routes (no redirect)
+  if (req.path.startsWith("/internal")) {
+    console.log(`✓ [Internal] Allowing HTTP for: ${req.path}`);
+    return next();
+  }
+
+  // Force HTTPS for all other routes (browser/public API)
+  if (req.headers["x-forwarded-proto"] !== "https" && process.env.NODE_ENV === 'production') {
+    console.log(`↪ Redirecting to HTTPS: ${req.path}`);
+    return res.redirect(301, "https://" + req.headers.host + req.url);
+  }
+
+  next();
+});
+
 // Middleware
 app.use(cors());
 app.use(express.json());
