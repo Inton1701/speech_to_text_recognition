@@ -15,7 +15,7 @@ const PORT = process.env.PORT || 3000;
 const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
 const ASSEMBLYAI_API_KEY = process.env.ASSEMBLYAI_API_KEY;
 const SPEECH_API = process.env.SPEECH_API || 'deepgram'; // 'deepgram' or 'assemblyai'
-const TRIGGER_WORDS = (process.env.TRIGGER_WORDS || 'alarm,emergency,help,fire').toLowerCase().split(',');
+const TRIGGER_WORDS = (process.env.TRIGGER_WORDS || 'alarm,too long ,help,fire').toLowerCase().split(',');
 
 // Store device results (in production, use Redis or database)
 const deviceResults = new Map();
@@ -55,7 +55,7 @@ console.log(`🔑 API Key configured: ${SPEECH_API === 'assemblyai' ? '✓ Assem
 // WebSocket connections for live audio streaming
 const deviceConnections = new Map();
 const SAMPLE_RATE = 16000;
-const BUFFER_DURATION = 3; // seconds (for AssemblyAI buffering)
+const BUFFER_DURATION = 2; // Reduced from 3 to 2 seconds for lower latency and memory
 
 wss.on('connection', (ws, req) => {
   const urlPath = req.url;
