@@ -703,13 +703,61 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log('═══════════════════════════════════════════════════\n');
 });
 
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('SIGTERM signal received: closing HTTP server');
-  process.exit(0);
+// Server error handling
+server.on('error', (error) => {
+  if (error.code === 'EADDRINUSE') {
+    console.error(`❌ Port ${PORT} is already in use`);
+    process.exit(1);
+  } else if (error.code === 'EACCES') {
+    console.error(`❌ Port ${PORT} requires elevated privileges`);
+    process.exit(1);
+  } else {
+    console.error('❌ Server error:', error);
+    process.exit(1);
+  }
 });
 
-process.on('SIGINT', () => {
-  console.log('\nSIGINT signal received: closing HTTP server');
-  process.exit(0);
+// Graceful shutdown
+const shutdown = async (signal) => {
+  console.log(`\n${signal} signal received: closing server gracefully...`);
+  
+  // Close all WebSocket connections
+  console.log('Closing WebSocket connections...');
+  deviceConnections.forEach((ws, deviceId) => {
+    console.log(`  Closing connection for device: ${deviceId}`);
+    ws.close(1001, 'Server shutting down');
+  });
+  deviceConnections.clear();
+  
+  // Close WebSocket server
+  wss.close(() => {
+    console.log('WebSocket server closed');
+  });
+  
+  // Close HTTP server
+  server.close(() => {
+    console.log('HTTP server closed');
+    console.log('✓ Graceful shutdown complete');
+    process.exit(0);
+  });
+  
+  // Force close after 10 seconds
+  setTimeout(() => {
+    console.error('Forced shutdown after timeout');
+    process.exit(1);
+  }, 10000);
+};
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+
+// Handle uncaught errors
+process.on('uncaughtException', (error) => {
+  console.error('❌ Uncaught Exception:', error);
+  shutdown('UNCAUGHT_EXCEPTION');
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
+  shutdown('UNHANDLED_REJECTION');
 });
